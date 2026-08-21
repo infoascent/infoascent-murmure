@@ -1,95 +1,93 @@
 import SwiftUI
 
-/// Settings — hotkey and model, per the brief. Opens on ⌘, via the standard `Settings` scene,
-/// so the system wires up the menu item and the shortcut.
+/// Settings, opened with ⌘, through the standard `Settings` scene so the system wires up
+/// the menu item and the shortcut.
+///
+/// A grouped `Form`, which is what every system settings pane is. Each control carries its
+/// explanation underneath rather than in a tooltip: these are choices made once and then
+/// forgotten, so the cost of reading them is paid once too.
 struct SettingsWindow: View {
     @Bindable var controller: DictationController
     @State private var settings = Settings.shared
 
     var body: some View {
-        ZStack {
-            DS.Color.chassis.ignoresSafeArea()
+        TabView {
+            general.tabItem { Label("General", systemImage: "gearshape") }
+            transcription.tabItem { Label("Transcription", systemImage: "waveform") }
+        }
+        .frame(width: 520)
+        .scenePadding()
+    }
 
-            VStack(alignment: .leading, spacing: DS.Space.wide) {
-                panel(label: "Push to talk") {
-                    HStack(spacing: DS.Space.snug) {
-                        ForEach(PushToTalkKey.allCases, id: \.self) { key in
-                            TransportKey(
-                                title: key.displayName,
-                                isEngaged: settings.pushToTalkKey == key,
-                                engagedColor: DS.Color.ink
-                            ) {
-                                settings.pushToTalkKey = key
-                                controller.reloadHotkey()
-                            }
-                            .background {
-                                if settings.pushToTalkKey == key {
-                                    RoundedRectangle(cornerRadius: DS.Radius.control)
-                                        .fill(DS.Color.selection)
-                                }
-                            }
-                        }
+    private var general: some View {
+        Form {
+            Section {
+                Picker("Push to talk", selection: Binding(
+                    get: { settings.pushToTalkKey },
+                    set: { key in
+                        settings.pushToTalkKey = key
+                        controller.reloadHotkey()
                     }
-                    note("Hold this key anywhere to dictate. The window's Record button works "
-                        + "regardless of what's focused.")
-                }
-
-                panel(label: "Model") {
-                    HStack(spacing: DS.Space.snug) {
-                        ForEach(SpeechEngineChoice.allCases, id: \.self) { choice in
-                            TransportKey(
-                                title: choice == .apple ? "Apple" : "Parakeet",
-                                isEngaged: settings.engine == choice,
-                                engagedColor: DS.Color.ink
-                            ) {
-                                settings.engine = choice
-                            }
-                            .background {
-                                if settings.engine == choice {
-                                    RoundedRectangle(cornerRadius: DS.Radius.control)
-                                        .fill(DS.Color.selection)
-                                }
-                            }
-                        }
+                )) {
+                    ForEach(PushToTalkKey.allCases, id: \.self) { key in
+                        Text(key.displayName).tag(key)
                     }
-                    note(settings.engine == .apple
-                        ? "Apple's on-device transcriber. Streams text while you speak; no download."
-                        : "Parakeet on the Neural Engine. Resolves on release; ~470 MB model.")
                 }
-
-                panel(label: "Cleanup") {
-                    Toggle(isOn: $settings.cleanupEnabled) {
-                        Silkscreen(text: "Clean up transcripts")
-                    }
-                    .toggleStyle(.switch)
-                    note("Strips fillers, fixes spacing and punctuation. The dictionary's "
-                        + "corrections run either way.")
-                }
-
-                Spacer()
+            } footer: {
+                Text("Hold this key in any app to dictate. The window's record button works "
+                    + "regardless of what's focused.")
             }
-            .padding(DS.Space.panel)
+
+            Section {
+                Picker("Microphone", selection: Binding(
+                    get: { settings.inputDeviceUID ?? MicrophonePicker.systemDefaultTag },
+                    set: { settings.inputDeviceUID = $0 == MicrophonePicker.systemDefaultTag ? nil : $0 }
+                )) {
+                    MicrophonePicker.options()
+                }
+            } footer: {
+                Text("Screen recorders and audio routers install aggregate devices that take "
+                    + "over the system default input and carry no microphone signal. If the "
+                    + "level never moves, pick your microphone here explicitly.")
+            }
+
+            Section {
+                Toggle("Play a sound when recording starts and stops", isOn: $settings.soundEnabled)
+            }
         }
-        .frame(width: 520, height: 460)
+        .formStyle(.grouped)
     }
 
-    private func panel<Content: View>(
-        label: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: DS.Space.base) {
-            Silkscreen(text: label, large: true)
-            content()
-        }
-        .padding(DS.Space.roomy)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(BrushedPanel())
-    }
+    private var transcription: some View {
+        Form {
+            Section {
+                Picker("Engine", selection: $settings.engine) {
+                    ForEach(SpeechEngineChoice.allCases, id: \.self) { choice in
+                        Text(choice == .apple ? "Apple" : "Parakeet").tag(choice)
+                    }
+                }
+            } footer: {
+                Text(settings.engine == .apple
+                    ? "Apple's on-device transcriber. Streams text while you speak, needs no "
+                        + "download, and follows your Mac's language."
+                    : "Parakeet on the Neural Engine. Resolves on release rather than live, "
+                        + "and downloads a ~470 MB model on first use.")
+            }
 
-    private func note(_ text: String) -> some View {
-        Text(text)
-            .font(DS.Font.label)
-            .foregroundStyle(DS.Color.inkSecondary)
-            .fixedSize(horizontal: false, vertical: true)
+            Section {
+                Toggle("Clean up transcripts", isOn: $settings.cleanupEnabled)
+                Toggle("Use on-device AI for cleanup", isOn: $settings.smartCleanup)
+                    .disabled(!settings.cleanupEnabled || !FoundationModelFormatter.isAvailable)
+            } footer: {
+                if let reason = FoundationModelFormatter.unavailableReason {
+                    Text(reason)
+                } else {
+                    Text("Cleanup removes fillers and fixes punctuation. The AI pass handles "
+                        + "spoken self-corrections and lists as well, and never leaves your Mac. "
+                        + "Dictionary corrections run either way.")
+                }
+            }
+        }
+        .formStyle(.grouped)
     }
 }

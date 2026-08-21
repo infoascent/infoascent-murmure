@@ -14,7 +14,12 @@ protocol TextFormatter: Sendable {
 /// the fallback when a model-backed formatter is unavailable or times out.
 struct RuleBasedFormatter: TextFormatter {
     /// Standalone filler words, stripped only when surrounded by word boundaries.
-    private static let fillers = ["um", "uh", "erm", "uhm", "hmm", "mhm"]
+    /// "ben" et "bah" sont volontairement absents : ils percutent des prenoms et des noms
+    /// propres ("Ben"), et ce filtre-ci retire vraiment du texte livre a l'utilisateur.
+    private static let fillers = [
+        "um", "uh", "erm", "uhm", "hmm", "mhm",
+        "euh", "heu", "euhh", "hein",
+    ]
 
     /// Spoken punctuation people actually use mid-dictation.
     private static let spokenPunctuation: [(String, String)] = [
@@ -22,6 +27,15 @@ struct RuleBasedFormatter: TextFormatter {
         ("new line", "\n"),
         ("open paren", " ("),
         ("close paren", ") "),
+        // Francais. Ordre important : les variantes longues doivent passer avant les
+        // courtes, sinon "nouveau paragraphe" est mange par "paragraphe".
+        ("nouveau paragraphe", "\n\n"),
+        ("nouvelle ligne", "\n"),
+        ("à la ligne", "\n"),
+        ("ouvre la parenthèse", " ("),
+        ("ouvrez la parenthèse", " ("),
+        ("ferme la parenthèse", ") "),
+        ("fermez la parenthèse", ") "),
     ]
 
     func format(_ raw: String) async -> String {

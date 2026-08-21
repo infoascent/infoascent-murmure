@@ -100,7 +100,7 @@ final class HotkeyMonitor {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 
-        Log.hotkey.info("listening for \(self.key.displayName)")
+        Log.hotkey.info("listening for \(self.key.displayName, privacy: .public)")
         return true
     }
 

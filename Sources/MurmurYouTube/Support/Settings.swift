@@ -30,6 +30,14 @@ final class Settings {
         didSet { defaults.set(engine.rawValue, forKey: Keys.engine) }
     }
 
+    /// Which microphone to record from, stored by CoreAudio UID. `nil` means "whatever the
+    /// system default is", which is the right default but the wrong answer often enough —
+    /// aggregate/loopback devices install themselves as the default and record silence —
+    /// that the choice has to be exposed.
+    var inputDeviceUID: String? {
+        didSet { defaults.set(inputDeviceUID, forKey: Keys.inputDeviceUID) }
+    }
+
     /// Run every engine on each recording and show them side by side, instead of
     /// transcribing with one. Nothing is typed into the focused app in this mode.
     var compareMode: Bool {
@@ -58,6 +66,7 @@ final class Settings {
         static let cleanupEnabled = "cleanupEnabled"
         static let soundEnabled = "soundEnabled"
         static let engine = "engine"
+        static let inputDeviceUID = "inputDeviceUID"
         static let smartCleanup = "smartCleanup"
         static let compareMode = "compareMode"
     }
@@ -67,6 +76,7 @@ final class Settings {
         pushToTalkKey = PushToTalkKey(rawValue: raw) ?? .rightOption
         // Apple by default: no download, no dependency, live text while speaking.
         engine = SpeechEngineChoice(rawValue: defaults.string(forKey: Keys.engine) ?? "") ?? .apple
+        inputDeviceUID = defaults.string(forKey: Keys.inputDeviceUID)
         cleanupEnabled = defaults.object(forKey: Keys.cleanupEnabled) as? Bool ?? true
         smartCleanup = defaults.object(forKey: Keys.smartCleanup) as? Bool ?? false
         compareMode = defaults.object(forKey: Keys.compareMode) as? Bool ?? false

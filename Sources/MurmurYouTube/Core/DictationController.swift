@@ -130,6 +130,7 @@ final class DictationController {
 
     private func beginDictation() {
         guard case .idle = state else { return }
+        Log.speech.info("dictation begin")
         state = .starting
         transcript = ""
         holdStarted = Date()
@@ -184,6 +185,7 @@ final class DictationController {
 
                 try capture.start(
                     outputFormat: format,
+                    deviceUID: Settings.shared.inputDeviceUID,
                     onBuffer: { chunk in
                         audioContinuation.yield(chunk)
                     },
@@ -247,10 +249,12 @@ final class DictationController {
 
             let raw = transcript
             guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                Log.speech.error("empty transcript — the engine received audio but recognised nothing")
                 state = .idle
                 transcript = ""
                 return
             }
+            Log.speech.info("raw transcript: \(raw.count, privacy: .public) chars")
 
             let cleaned = Settings.shared.cleanupEnabled
                 ? await activeFormatter.format(raw)
@@ -265,6 +269,7 @@ final class DictationController {
             }
 
             recordRun(text: output, corrections: corrections)
+            Log.inject.info("inserting \(output.count, privacy: .public) chars")
             TextInjector.insert(output)
             if Settings.shared.soundEnabled { NSSound(named: "Pop")?.play() }
 
@@ -415,7 +420,7 @@ final class DictationController {
     }
 
     private func fail(_ message: String) {
-        Log.app.error("\(message)")
+        Log.app.error("dictation failed — \(message, privacy: .public)")
         capture.stop()
         audioContinuation?.finish()
         audioContinuation = nil

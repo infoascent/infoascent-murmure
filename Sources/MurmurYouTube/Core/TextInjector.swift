@@ -25,7 +25,7 @@ enum TextInjector {
 
         switch insertViaAccessibility(text) {
         case .inserted:
-            Log.inject.info("inserted via AX (\(text.count) chars)")
+            Log.inject.info("inserted via AX (\(text.count, privacy: .public) chars)")
         case .unverified(let reason):
             Log.inject.info("AX insert not verified (\(reason, privacy: .public)) — pasting")
             insertViaPasteboard(text)
@@ -129,7 +129,7 @@ enum TextInjector {
             // ⌘V arrives, or a fast paste can grab the *previous* contents.
             try? await Task.sleep(for: .milliseconds(40))
             postCommandV()
-            Log.inject.info("pasted (\(text.count) chars)")
+            Log.inject.info("pasted (\(text.count, privacy: .public) chars)")
 
             // The paste is asynchronous in the target app; restore only once it's had time
             // to read the pasteboard.

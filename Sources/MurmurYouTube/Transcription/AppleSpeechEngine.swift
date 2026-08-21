@@ -77,13 +77,13 @@ actor AppleSpeechEngine: TranscriptionEngine {
                 chunkContinuation.yield(TranscriptionChunk(text: final, isFinal: true))
                 chunkContinuation.finish()
             } catch {
-                Log.speech.error("results stream failed: \(error.localizedDescription)")
+                Log.speech.error("results stream failed: \(error.localizedDescription, privacy: .public)")
                 chunkContinuation.finish(throwing: error)
             }
         }
 
         try await analyzer.start(inputSequence: inputStream)
-        Log.speech.info("SpeechAnalyzer started for \(resolvedLocale.identifier)")
+        Log.speech.info("SpeechAnalyzer started for \(resolvedLocale.identifier, privacy: .public)")
 
         return chunks
     }
@@ -99,7 +99,7 @@ actor AppleSpeechEngine: TranscriptionEngine {
         do {
             try await analyzer?.finalizeAndFinishThroughEndOfInput()
         } catch {
-            Log.speech.error("finalize failed: \(error.localizedDescription)")
+            Log.speech.error("finalize failed: \(error.localizedDescription, privacy: .public)")
             await analyzer?.cancelAndFinishNow()
         }
 

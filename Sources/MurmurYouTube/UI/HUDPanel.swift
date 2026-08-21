@@ -1,16 +1,16 @@
 import AppKit
 import SwiftUI
 
-/// The floating capsule that appears while you hold the key.
+/// The floating pill that appears while you hold the key.
 ///
-/// The single most important property here is that this panel **never becomes key**.
-/// If it did, the user's text field would lose focus and `TextInjector` would have
-/// nothing to insert into. Hence `.nonactivatingPanel` plus `canBecomeKey == false`.
+/// The single most important property here is that this panel **never becomes key**. If it
+/// did, the user's text field would lose focus and `TextInjector` would have nothing to
+/// insert into. Hence `.nonactivatingPanel` plus `canBecomeKey == false`.
 @MainActor
 final class HUDPanel: NSPanel {
     init(controller: DictationController) {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 340, height: 76),
+            contentRect: NSRect(origin: .zero, size: HUDView.size),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -27,30 +27,45 @@ final class HUDPanel: NSPanel {
         backgroundColor = .clear
         hasShadow = false
 
-        contentView = NSHostingView(rootView: HUDView(controller: controller))
+        let hosting = NSHostingView(rootView: HUDView(controller: controller))
+        hosting.frame = NSRect(origin: .zero, size: HUDView.size)
+        contentView = hosting
     }
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    /// Parks the panel just above the Dock, horizontally centered on the active screen.
+    /// Parks the pill just below the text caret, so it sits with what you're typing rather
+    /// than in a corner you aren't looking at.
     ///
-    /// `NSScreen.main` is the screen with the *key window* — and an accessory app with a
-    /// non-activating panel never has one, so it can be nil. Falling back to `screens.first`
-    /// keeps the HUD on-screen instead of stranding it at the origin.
+    /// Below rather than above: a caret is usually at the end of what you've just written,
+    /// and the space underneath is empty while the space above holds the text you're
+    /// still reading.
     func reposition() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
-            Log.app.error("no screen available to position HUD")
-            return
-        }
-        let visible = screen.visibleFrame
+        let anchor = CaretLocator.anchorRect()
         let size = frame.size
-        setFrameOrigin(
-            NSPoint(
-                x: visible.midX - size.width / 2,
-                y: visible.minY + 96
-            )
+        let gap: CGFloat = 8
+
+        var origin = NSPoint(
+            x: anchor.midX - size.width / 2,
+            y: anchor.minY - size.height - gap
         )
+
+        // Keep the whole pill on the screen it landed on. Without this it disappears off
+        // the bottom edge whenever you dictate into the last line of a full-height window.
+        let screen = NSScreen.screens.first { $0.frame.contains(anchor.origin) }
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        if let visible = screen?.visibleFrame {
+            origin.x = min(max(origin.x, visible.minX + gap), visible.maxX - size.width - gap)
+            if origin.y < visible.minY + gap {
+                // No room below: flip above the caret instead of clamping onto it.
+                origin.y = anchor.maxY + gap
+            }
+            origin.y = min(origin.y, visible.maxY - size.height - gap)
+        }
+
+        setFrameOrigin(origin)
     }
 
     func present() {
@@ -63,14 +78,14 @@ final class HUDPanel: NSPanel {
         alphaValue = 0
         orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.16
+            context.duration = 0.12
             animator().alphaValue = 1
         }
     }
 
     func dismiss() {
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.16
+            context.duration = 0.12
             animator().alphaValue = 0
         } completionHandler: { [weak self] in
             // AppKit always calls this on the main thread.

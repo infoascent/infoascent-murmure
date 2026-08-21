@@ -2,78 +2,79 @@ import MurmurDictionary
 import AppKit
 import SwiftUI
 
-/// The app's main window — the front panel of the unit.
+/// The app's window: a sidebar and a detail pane, the shape every system app uses.
 ///
-/// Laid out the way a deck is: transport and meter across the top on the panel itself, then
-/// a recessed well below holding whichever section is selected. The section selector is a
-/// row of keys, not a segmented control, because everything else here is a physical control
-/// and one piece of stock UI would give the whole thing away.
+/// The window is a convenience, not the product. Dictation happens by holding the
+/// push-to-talk key in whatever app you're already typing in, and the HUD is what you look
+/// at while it happens. So this window's job is the things you can't do from a hotkey:
+/// start a recording without one, read back what was transcribed, and teach the dictionary.
 struct MainWindow: View {
     @Bindable var controller: DictationController
 
-    @State private var section: Section = .transcriptions
+    @State private var section: Section = .dictate
 
     enum Section: String, CaseIterable, Identifiable {
-        case transcriptions
+        case dictate
+        case history
         case dictionary
 
         var id: String { rawValue }
-        var title: String { self == .transcriptions ? "Transcriptions" : "Dictionary" }
-    }
 
-    var body: some View {
-        ZStack {
-            DS.Color.chassis.ignoresSafeArea()
-
-            VStack(spacing: DS.Space.base) {
-                TransportPanel(controller: controller)
-
-                sectionKeys
-
-                Well {
-                    Group {
-                        switch section {
-                        case .transcriptions: TranscriptionList()
-                        case .dictionary: DictionaryPanel()
-                        }
-                    }
-                    .padding(DS.Space.hair)
-                }
-                .frame(maxHeight: .infinity)
+        var title: String {
+            switch self {
+            case .dictate: "Dictate"
+            case .history: "History"
+            case .dictionary: "Dictionary"
             }
-            .padding(DS.Space.roomy)
         }
-        .frame(minWidth: 720, minHeight: 520)
+
+        var symbol: String {
+            switch self {
+            case .dictate: "mic"
+            case .history: "clock"
+            case .dictionary: "character.book.closed"
+            }
+        }
     }
 
-    private var sectionKeys: some View {
-        HStack(spacing: DS.Space.snug) {
-            ForEach(Section.allCases) { candidate in
-                TransportKey(
-                    title: candidate.title,
-                    isEngaged: section == candidate,
-                    engagedColor: DS.Color.ink
-                ) {
-                    withAnimation(DS.Motion.panel) { section = candidate }
-                }
-                .background {
-                    if section == candidate {
-                        RoundedRectangle(cornerRadius: DS.Radius.control)
-                            .fill(DS.Color.selection)
-                    }
-                }
+    /// Tabs, not a sidebar.
+    ///
+    /// A `NavigationSplitView` spends a fixed ~180pt column on three items that never grow,
+    /// and collapses that column entirely once the window is narrow — which hid the only
+    /// navigation the app has. Tabs cost a single row, stay visible at every width, and are
+    /// what a three-section utility window uses on macOS anyway.
+    var body: some View {
+        TabView(selection: $section) {
+            ForEach(Section.allCases) { item in
+                pane(for: item)
+                    .tabItem { Label(item.title, systemImage: item.symbol) }
+                    .tag(item)
             }
-            Spacer()
-            Vents(count: 8)
+        }
+        .frame(minWidth: 520, minHeight: 420)
+    }
+
+    /// Each pane gets its own `NavigationStack`. In a macOS `TabView` that is what gives
+    /// `.searchable` and `.toolbar` somewhere to attach — without it the search field and
+    /// the pane's action button have no anchor and silently don't render.
+    @ViewBuilder
+    private func pane(for section: Section) -> some View {
+        NavigationStack {
+            switch section {
+            case .dictate: DictatePane(controller: controller)
+            case .history: HistoryPane()
+            case .dictionary: DictionaryPanel()
+            }
         }
     }
 }
 
-// MARK: - Transport
+// MARK: - Dictate
 
-/// Record / stop, the level meter, and the counter — the top of the unit.
-private struct TransportPanel: View {
+/// The record button, the live level, and the one line of status that matters.
+private struct DictatePane: View {
     @Bindable var controller: DictationController
+    @State private var settings = Settings.shared
 
     @State private var elapsed: TimeInterval = 0
     @State private var startedAt: Date?
@@ -81,78 +82,169 @@ private struct TransportPanel: View {
     private var isRecording: Bool { controller.state.isActive }
 
     var body: some View {
-        HStack(spacing: DS.Space.roomy) {
-            VStack(alignment: .leading, spacing: DS.Space.snug) {
-                Silkscreen(text: "Transport")
-                HStack(spacing: DS.Space.snug) {
-                    TransportKey(
-                        title: isRecording ? "Stop" : "Record",
-                        systemImage: isRecording ? "stop.fill" : "circle.fill",
-                        isEngaged: isRecording
-                    ) {
-                        if isRecording {
-                            controller.stopButtonRecording()
-                        } else {
-                            controller.startButtonRecording()
-                        }
-                    }
+        VStack(spacing: DS.Space.wide) {
+            Spacer(minLength: 0)
 
-                    HStack(spacing: DS.Space.tight) {
-                        Lamp(color: DS.Color.record, isLit: isRecording)
-                        Silkscreen(text: "Rec")
-                    }
-                    .padding(.leading, DS.Space.tight)
-                }
+            recordButton
+
+            Text(statusLine)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+                .fixedSize(horizontal: false, vertical: true)
+
+            LevelBar(level: controller.level, isActive: isRecording)
+                .frame(width: 220, height: 4)
+
+            if !controller.transcript.isEmpty {
+                Text(controller.transcript)
+                    .font(.body)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: 440, alignment: .leading)
+                    .padding(DS.Space.roomy)
+                    .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: DS.Radius.card))
             }
 
-            VStack(alignment: .leading, spacing: DS.Space.tight) {
-                Silkscreen(text: "Level")
-                VUMeter(level: controller.level, isActive: isRecording)
-                    .frame(width: 168, height: 54)
-            }
+            Spacer(minLength: 0)
 
-            VStack(alignment: .leading, spacing: DS.Space.tight) {
-                Silkscreen(text: "Counter")
-                DeckWindow {
-                    Readout(text: counterText, large: true)
-                        .padding(.horizontal, DS.Space.base)
-                        .padding(.vertical, DS.Space.snug)
-                }
-            }
-
-            Spacer()
-
-            VStack(alignment: .trailing, spacing: DS.Space.snug) {
-                Screw()
-                Screw()
-            }
+            microphoneRow
         }
-        .padding(DS.Space.roomy)
-        .background(BrushedPanel())
+        .padding(DS.Space.panel)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: controller.state.isActive) { _, active in
             startedAt = active ? Date() : nil
             if !active { elapsed = 0 }
         }
         .task(id: startedAt) {
-            guard let startedAt else { return }
+            guard startedAt != nil else { return }
             while !Task.isCancelled {
-                elapsed = Date().timeIntervalSince(startedAt)
+                if let startedAt { elapsed = Date().timeIntervalSince(startedAt) }
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
     }
 
-    /// Minutes and seconds, zero-padded, the way a tape counter reads.
+    /// One large target, because this is the only thing on the pane you actually press.
+    /// Click starts, click again stops — the hotkey is the hold-to-talk path, and making the
+    /// button behave the same way would mean holding the mouse down to dictate.
+    private var recordButton: some View {
+        Button {
+            if isRecording {
+                controller.stopButtonRecording()
+            } else {
+                controller.startButtonRecording()
+            }
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(isRecording ? AnyShapeStyle(DS.recording) : AnyShapeStyle(.tint))
+                    .frame(width: 96, height: 96)
+                    .shadow(color: .black.opacity(0.16), radius: 10, y: 4)
+
+                Image(systemName: isRecording ? "stop.fill" : "mic.fill")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundStyle(.white)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
+        .animation(DS.Motion.standard, value: isRecording)
+    }
+
+    private var statusLine: String {
+        switch controller.state {
+        case .error(let message):
+            return message
+        case .idle:
+            return "Hold \(settings.pushToTalkKey.displayName) anywhere to dictate, "
+                + "or click to record here."
+        case .starting:
+            return "Starting…"
+        case .listening:
+            return "Listening — \(counterText)"
+        case .finishing:
+            return "Transcribing…"
+        }
+    }
+
     private var counterText: String {
         let total = Int(elapsed)
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
+
+    /// The microphone picker lives here, not only in Settings.
+    ///
+    /// The system default input is frequently an aggregate or loopback device installed by
+    /// screen recorders and audio routers, whose first channel carries no microphone signal
+    /// at all. When that happens dictation records perfect silence and reports no error, so
+    /// the control that fixes it has to be somewhere you'd actually look.
+    private var microphoneRow: some View {
+        HStack(spacing: DS.Space.snug) {
+            Image(systemName: "waveform.badge.mic")
+                .foregroundStyle(.secondary)
+
+            Picker("Microphone", selection: Binding(
+                get: { settings.inputDeviceUID ?? MicrophonePicker.systemDefaultTag },
+                set: { settings.inputDeviceUID = $0 == MicrophonePicker.systemDefaultTag ? nil : $0 }
+            )) {
+                MicrophonePicker.options()
+            }
+            .labelsHidden()
+            .frame(maxWidth: 280)
+        }
+        .disabled(isRecording)
+    }
 }
 
-// MARK: - Transcriptions
+/// The microphone list, shared by the pane, Settings and the menu bar so all three can
+/// never disagree about what's connected.
+enum MicrophonePicker {
+    /// A `Picker` tag can't be nil, and an empty string would collide with a device whose
+    /// UID failed to read.
+    static let systemDefaultTag = "__system_default__"
+
+    @ViewBuilder
+    static func options() -> some View {
+        Text(defaultLabel).tag(systemDefaultTag)
+        Divider()
+        ForEach(AudioDevices.inputs()) { device in
+            Text(device.name).tag(device.uid)
+        }
+    }
+
+    /// Names what the system default currently resolves to, so an aggregate device sitting
+    /// in that slot is visible rather than hidden behind the word "default".
+    static var defaultLabel: String {
+        guard let device = AudioDevices.systemDefaultInput() else { return "System default" }
+        return "System default — \(device.name)"
+    }
+}
+
+/// A level meter reduced to a single bar. A VU needle was decoration; this answers the only
+/// question being asked, which is whether the microphone is hearing anything.
+private struct LevelBar: View {
+    let level: Float
+    let isActive: Bool
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                Capsule()
+                    .fill(isActive ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary))
+                    .frame(width: geometry.size.width * CGFloat(isActive ? min(max(level, 0), 1) : 0))
+                    .animation(.linear(duration: 0.08), value: level)
+            }
+        }
+    }
+}
+
+// MARK: - History
 
 /// Past transcriptions, searchable, each copyable.
-private struct TranscriptionList: View {
+private struct HistoryPane: View {
     @State private var store = RunStore.shared
     @State private var query = ""
     @State private var isConfirmingClear = false
@@ -165,52 +257,39 @@ private struct TranscriptionList: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            SearchField(text: $query, placeholder: "Search transcriptions")
-
+        Group {
             if runs.isEmpty {
-                EmptyPanel(
-                    label: store.runs.isEmpty ? "No recordings" : "No matches",
-                    detail: store.runs.isEmpty ? "Press Record to start." : "Try a different search."
-                )
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: DS.Space.snug) {
-                        ForEach(runs) { run in
-                            TranscriptionRow(run: run) {
-                                withAnimation(DS.Motion.panel) { RunLog.delete(run) }
-                            }
-                        }
-                    }
-                    .padding(DS.Space.base)
+                ContentUnavailableView {
+                    Label(
+                        store.runs.isEmpty ? "No transcriptions" : "No matches",
+                        systemImage: store.runs.isEmpty ? "clock" : "magnifyingglass"
+                    )
+                } description: {
+                    Text(store.runs.isEmpty
+                        ? "Everything you dictate shows up here."
+                        : "Try a different search.")
                 }
-                footer
+            } else {
+                List {
+                    ForEach(runs) { run in
+                        HistoryRow(run: run)
+                            .listRowSeparator(.visible)
+                    }
+                }
+                .listStyle(.inset)
             }
         }
-    }
-
-    private var footer: some View {
-        HStack {
-            Silkscreen(
-                text: "\(store.runs.count) recording\(store.runs.count == 1 ? "" : "s")",
-                color: DS.Color.inkOnDeck.opacity(0.5)
-            )
-            Spacer()
-            Button { isConfirmingClear = true } label: {
-                Silkscreen(text: "Delete all", color: DS.Color.inkOnDeck.opacity(0.5))
+        .searchable(text: $query, prompt: "Search transcriptions")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Delete All", systemImage: "trash") { isConfirmingClear = true }
+                    .disabled(store.runs.isEmpty)
             }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, DS.Space.base)
-        .padding(.vertical, DS.Space.snug)
-        .background(DS.Color.deck)
-        .overlay(alignment: .top) {
-            Rectangle().fill(DS.Color.seam).frame(height: DS.Border.seam)
         }
         // Confirmed, unlike a single row: one row is trivially re-recorded, the whole
         // history is not, and there's no undo.
         .confirmationDialog(
-            "Delete all \(store.runs.count) recordings?",
+            "Delete all \(store.runs.count) transcriptions?",
             isPresented: $isConfirmingClear,
             titleVisibility: .visible
         ) {
@@ -222,170 +301,59 @@ private struct TranscriptionList: View {
     }
 }
 
-private struct TranscriptionRow: View {
+private struct HistoryRow: View {
     let run: DictationRun
-    let onDelete: () -> Void
 
     @State private var didCopy = false
-    @State private var isHovering = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Space.snug) {
-            HStack(spacing: DS.Space.snug) {
-                Silkscreen(text: run.engine, color: DS.Color.inkOnDeck.opacity(0.7))
-                Readout(text: String(format: "%.2fs", run.processSeconds))
-                    .foregroundStyle(DS.Color.inkOnDeck.opacity(0.6))
-                Spacer()
-                Text(run.date, style: .time)
-                    .font(DS.Font.caption)
-                    .foregroundStyle(DS.Color.inkOnDeck.opacity(0.5))
-                copyButton
-                deleteButton
-                    .opacity(isHovering ? 1 : 0)
-            }
-
             Text(run.text)
-                .font(DS.Font.body)
-                .foregroundStyle(DS.Color.inkOnDeck)
+                .font(.body)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            if let corrections = run.corrections, !corrections.isEmpty {
-                CorrectionBadges(corrections: corrections)
-            }
-        }
-        .padding(DS.Space.base)
-        .background {
-            DeckWindow { Color.clear }
-                .opacity(isHovering ? 0.85 : 1)
-        }
-        .onHover { isHovering = $0 }
-    }
+            HStack(spacing: DS.Space.snug) {
+                Text(run.date, style: .time)
+                Text("·")
+                Text(run.engine)
+                Text("·")
+                Text(String(format: "%.1fs", run.processSeconds))
 
-    private var copyButton: some View {
-        Button {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(run.text, forType: .string)
-            didCopy = true
-            Task {
-                try? await Task.sleep(for: .seconds(1.4))
-                didCopy = false
-            }
-        } label: {
-            Silkscreen(
-                text: didCopy ? "Copied" : "Copy",
-                color: DS.Color.inkOnDeck.opacity(didCopy ? 1 : 0.6)
-            )
-            .padding(.horizontal, DS.Space.snug)
-            .padding(.vertical, DS.Space.tight)
-            .overlay(
-                RoundedRectangle(cornerRadius: DS.Radius.chip)
-                    .strokeBorder(DS.Color.inkOnDeck.opacity(0.3), lineWidth: DS.Border.hairline)
-            )
-        }
-        .buttonStyle(.plain)
-    }
+                if let corrections = run.corrections, !corrections.isEmpty {
+                    Text("·")
+                    Label("\(corrections.count) corrected", systemImage: "character.book.closed")
+                        .help(corrections.map { "\($0.from) → \($0.to)" }.joined(separator: ", "))
+                }
 
-    /// Appears on hover only, and deletes without a confirmation — a single transcript is
-    /// cheap to redo, and a dialog on every row would make tidying up tedious. The
-    /// irreversible one is "Delete all", which does confirm.
-    private var deleteButton: some View {
-        Button(action: onDelete) {
-            Image(systemName: "trash")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(DS.Color.inkOnDeck.opacity(0.55))
-                .padding(.horizontal, DS.Space.snug)
-                .padding(.vertical, DS.Space.tight)
-                .overlay(
-                    RoundedRectangle(cornerRadius: DS.Radius.chip)
-                        .strokeBorder(DS.Color.inkOnDeck.opacity(0.3), lineWidth: DS.Border.hairline)
-                )
-        }
-        .buttonStyle(.plain)
-        .help("Delete this transcription")
-    }
-}
+                Spacer()
 
-/// Shows that the dictionary fired, and on what. Without this the dictionary is invisible
-/// and you can't tell a rule that works from one that never matches.
-private struct CorrectionBadges: View {
-    let corrections: [AppliedCorrection]
-
-    var body: some View {
-        HStack(spacing: DS.Space.snug) {
-            Silkscreen(text: "Corrected", color: DS.Color.meterAmber)
-            ForEach(corrections, id: \.self) { correction in
-                HStack(spacing: DS.Space.tight) {
-                    Text(correction.from)
-                        .strikethrough()
-                        .foregroundStyle(DS.Color.inkOnDeck.opacity(0.5))
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 7, weight: .bold))
-                        .foregroundStyle(DS.Color.inkOnDeck.opacity(0.4))
-                    Text(correction.to)
-                        .foregroundStyle(DS.Color.inkOnDeck)
-                    if correction.count > 1 {
-                        Text("×\(correction.count)")
-                            .foregroundStyle(DS.Color.inkOnDeck.opacity(0.5))
+                Button(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(run.text, forType: .string)
+                    didCopy = true
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.4))
+                        didCopy = false
                     }
                 }
-                .font(DS.Font.caption)
-                .padding(.horizontal, DS.Space.snug)
-                .padding(.vertical, DS.Space.hair)
-                .overlay(
-                    RoundedRectangle(cornerRadius: DS.Radius.chip)
-                        .strokeBorder(DS.Color.meterAmber.opacity(0.35), lineWidth: DS.Border.hairline)
-                )
+                .buttonStyle(.borderless)
+                .controlSize(.small)
             }
-            Spacer()
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
-    }
-}
-
-// MARK: - Shared
-
-struct SearchField: View {
-    @Binding var text: String
-    let placeholder: String
-
-    var body: some View {
-        HStack(spacing: DS.Space.snug) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(DS.Color.inkOnDeck.opacity(0.5))
-            TextField(placeholder, text: $text)
-                .textFieldStyle(.plain)
-                .font(DS.Font.body)
-                .foregroundStyle(DS.Color.inkOnDeck)
-            if !text.isEmpty {
-                Button { text = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(DS.Color.inkOnDeck.opacity(0.4))
-                }
-                .buttonStyle(.plain)
+        .padding(.vertical, DS.Space.tight)
+        .swipeActions(edge: .trailing) {
+            Button("Delete", systemImage: "trash", role: .destructive) { RunLog.delete(run) }
+        }
+        .contextMenu {
+            Button("Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(run.text, forType: .string)
             }
+            Button("Delete", role: .destructive) { RunLog.delete(run) }
         }
-        .padding(.horizontal, DS.Space.base)
-        .padding(.vertical, DS.Space.snug)
-        .background(DS.Color.deck)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(DS.Color.seam).frame(height: DS.Border.seam)
-        }
-    }
-}
-
-struct EmptyPanel: View {
-    let label: String
-    let detail: String
-
-    var body: some View {
-        VStack(spacing: DS.Space.snug) {
-            Silkscreen(text: label, large: true, color: DS.Color.inkOnDeck.opacity(0.55))
-            Text(detail)
-                .font(DS.Font.label)
-                .foregroundStyle(DS.Color.inkOnDeck.opacity(0.4))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

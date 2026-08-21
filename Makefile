@@ -26,13 +26,25 @@ CONTENTS := $(BUNDLE)/Contents
 ## changes on every build — makes the user re-grant after every `make`. Signing with a
 ## stable Developer ID keeps the identity constant and the grant sticky. Falls back to
 ## ad-hoc ("-") on a machine without the cert.
+## Prefers a real Developer ID, falls back to the locally-generated "Murmur Local Signing"
+## certificate, and only then to ad-hoc. The local certificate exists for exactly one
+## reason: TCC binds the Accessibility grant to the signing identity, and an ad-hoc
+## signature is regenerated on every build — so every `make install` silently revoked
+## Accessibility, CGEventTapCreate then failed, and the push-to-talk key did nothing at all
+## with no user-visible error. A stable identity keeps the grant across rebuilds.
+##
+## Recreate it with `make signing-cert` if the keychain is ever reset.
 SIGN_ID := $(shell security find-identity -v -p codesigning 2>/dev/null \
              | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)".*/\1/')
+ifeq ($(strip $(SIGN_ID)),)
+SIGN_ID := $(shell security find-identity -v -p codesigning 2>/dev/null \
+             | grep "Murmur Local Signing" | head -1 | sed -E 's/.*"(.*)".*/\1/')
+endif
 ifeq ($(strip $(SIGN_ID)),)
 SIGN_ID := -
 endif
 
-.PHONY: all build app run install clean icon
+.PHONY: all build app run install clean icon signing-cert
 
 all: app
 
@@ -79,6 +91,23 @@ install: app
 	@cp -R "$(BUNDLE)" "/Applications/$(APPNAME)"
 	@open "/Applications/$(APPNAME)"
 	@echo "installed to /Applications/$(APPNAME)"
+
+## Regenerates the local code-signing certificate. Only needed once per machine, or after
+## a keychain reset. Harmless to re-run: it replaces the identity of the same name.
+signing-cert:
+	@tmp=$$(mktemp -d); \
+	openssl req -x509 -newkey rsa:2048 -keyout $$tmp/key.pem -out $$tmp/cert.pem \
+		-days 3650 -nodes -subj "/CN=Murmur Local Signing" \
+		-addext "basicConstraints=critical,CA:false" \
+		-addext "keyUsage=critical,digitalSignature" \
+		-addext "extendedKeyUsage=critical,codeSigning" 2>/dev/null; \
+	openssl pkcs12 -export -out $$tmp/cert.p12 -inkey $$tmp/key.pem -in $$tmp/cert.pem \
+		-name "Murmur Local Signing" \
+		-keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
+		-passout pass:murmur 2>/dev/null; \
+	security import $$tmp/cert.p12 -k $$HOME/Library/Keychains/login.keychain-db -P murmur -A; \
+	rm -rf $$tmp
+	@security find-identity -v -p codesigning | grep "Murmur Local Signing"
 
 clean:
 	@rm -rf .build "$(STAGE)" "$(SCRATCH)"
