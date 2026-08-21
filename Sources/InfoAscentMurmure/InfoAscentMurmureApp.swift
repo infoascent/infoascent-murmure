@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @main
-struct MurmurYouTubeApp: App {
+struct InfoAscentMurmureApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {

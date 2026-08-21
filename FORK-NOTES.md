@@ -1,7 +1,11 @@
-# Murmur — fork InfoAscent
+# InfoAscent Murmure
 
-Fork de [per-simmons/murmur-youtube](https://github.com/per-simmons/murmur-youtube),
-adapté au français et corrigé pour fonctionner en usage réel sur macOS 26.
+Dictée vocale locale pour macOS, en remplacement de Wispr Flow. Fork de
+[per-simmons/murmur-youtube](https://github.com/per-simmons/murmur-youtube), adapté au français,
+corrigé pour fonctionner en usage réel sur macOS 26, et renommé.
+
+Identité : bundle `com.infoascent.murmure`, binaire `InfoAscentMurmure`, données dans
+`~/Library/Application Support/InfoAscentMurmure/`.
 
 ## Installation
 
