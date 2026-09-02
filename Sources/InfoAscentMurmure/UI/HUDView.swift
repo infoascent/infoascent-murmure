@@ -31,8 +31,18 @@ struct HUDView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.orange)
             } else {
-                Waveform(level: controller.level, isActive: controller.state == .listening)
-                    .padding(.horizontal, 12)
+                HStack(spacing: 5) {
+                    // Latched hands-free: the key isn't being held, so the pill is the only
+                    // thing saying the mic is still open. Red, because it is recording —
+                    // that is the one thing red means here.
+                    if controller.isLocked {
+                        Circle()
+                            .fill(.red)
+                            .frame(width: 5, height: 5)
+                    }
+                    Waveform(level: controller.level, isActive: controller.state == .listening)
+                }
+                .padding(.horizontal, controller.isLocked ? 8 : 12)
             }
         }
         .frame(width: Self.size.width, height: Self.size.height)
@@ -49,7 +59,7 @@ struct HUDView: View {
         switch controller.state {
         case .error(let message): message
         case .finishing: "Transcribing…"
-        default: "Listening…"
+        default: controller.isLocked ? "Listening — tap the key again to stop" : "Listening…"
         }
     }
 }

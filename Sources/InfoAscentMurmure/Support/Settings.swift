@@ -26,6 +26,21 @@ final class Settings {
         didSet { defaults.set(pushToTalkKey.rawValue, forKey: Keys.pushToTalkKey) }
     }
 
+    /// How long the push-to-talk key has to be held before the recording counts.
+    ///
+    /// The key lives where a hand rests, and clipping it while typing used to start an
+    /// utterance nobody meant. Anything shorter than this is discarded without
+    /// transcribing. `0` accepts every press.
+    var minimumHoldSeconds: Double {
+        didSet { defaults.set(minimumHoldSeconds, forKey: Keys.minimumHoldSeconds) }
+    }
+
+    /// Two quick taps latch the mic open, one tap ends it — dictation without holding the
+    /// key down for the whole utterance.
+    var handsFreeLockEnabled: Bool {
+        didSet { defaults.set(handsFreeLockEnabled, forKey: Keys.handsFreeLockEnabled) }
+    }
+
     var engine: SpeechEngineChoice {
         didSet { defaults.set(engine.rawValue, forKey: Keys.engine) }
     }
@@ -69,6 +84,8 @@ final class Settings {
         static let inputDeviceUID = "inputDeviceUID"
         static let smartCleanup = "smartCleanup"
         static let compareMode = "compareMode"
+        static let minimumHoldSeconds = "minimumHoldSeconds"
+        static let handsFreeLockEnabled = "handsFreeLockEnabled"
     }
 
     private init() {
@@ -81,5 +98,9 @@ final class Settings {
         smartCleanup = defaults.object(forKey: Keys.smartCleanup) as? Bool ?? false
         compareMode = defaults.object(forKey: Keys.compareMode) as? Bool ?? false
         soundEnabled = defaults.object(forKey: Keys.soundEnabled) as? Bool ?? true
+        // Long enough to drop a key brushed while typing, short enough to keep a one-word
+        // answer. Measured against real holds: deliberate ones don't come in under 400ms.
+        minimumHoldSeconds = defaults.object(forKey: Keys.minimumHoldSeconds) as? Double ?? 0.4
+        handsFreeLockEnabled = defaults.object(forKey: Keys.handsFreeLockEnabled) as? Bool ?? true
     }
 }

@@ -6,11 +6,15 @@ import Foundation
 /// The tap runs on a real-time audio thread, so everything it touches lives behind
 /// `nonisolated(unsafe)` and is only ever mutated from that one thread.
 final class AudioCapture: @unchecked Sendable {
-    private let engine = AVAudioEngine()
+    /// Rebuilt for every recording rather than reused — see `start`.
+    private var engine: AVAudioEngine?
     private nonisolated(unsafe) var converter: AVAudioConverter?
     private nonisolated(unsafe) var outputFormat: AVAudioFormat?
     /// What `converter` expects: the tap's format, or a mono version of it.
     private nonisolated(unsafe) var captureFormat: AVAudioFormat?
+    /// The tap format `captureFormat` and `converter` were built for. Compared against
+    /// every buffer so a device that moves mid-recording is picked up.
+    private nonisolated(unsafe) var configuredTapFormat: AVAudioFormat?
 
     /// Which channel of a multi-channel tap carries the microphone.
     ///
@@ -37,72 +41,69 @@ final class AudioCapture: @unchecked Sendable {
         self.onBuffer = onBuffer
         self.onLevel = onLevel
         self.outputFormat = outputFormat
+        converter = nil
+        captureFormat = nil
+        configuredTapFormat = nil
+        dominantChannel = nil
+        channelEnergy = []
+        energyFrames = 0
 
-        // Bind the device *before* reading the input format: the format reported by the
-        // node belongs to whatever device is currently attached, so reading it first would
-        // configure the converter for the old device and hand the engine resampled noise.
+        // A brand-new engine per recording rather than one reused for the life of the app.
         //
-        // `reset()` first because the engine is reused across recordings. Once its graph has
-        // been configured against one device, moving to another without a reset leaves the
-        // node reporting the previous device's format.
+        // An engine's graph is built against whichever device was attached at the time, and
+        // `reset()` does not reliably undo that. Connect a Bluetooth headset and the node
+        // keeps describing the device it was built for: `outputFormat(forBus:)` reports the
+        // old sample rate and channel count, the tap gets installed with a format the
+        // hardware never produces, and capture then delivers **nothing at all** — no error,
+        // no buffers, no level, until the app is relaunched or the headset disconnected.
+        // Building the engine fresh costs a few milliseconds and removes the whole class of
+        // stale-graph failures.
+        let engine = AVAudioEngine()
+        self.engine = engine
+
+        // Bind the device before touching the node's format for the same reason: the format
+        // belongs to whatever device is currently attached.
         if let device = AudioDevices.preferred(uid: deviceUID) {
-            engine.reset()
             try AudioDevices.bind(engine, to: device)
             Log.audio.info("input device: \(device.name, privacy: .public)")
         }
 
         let input = engine.inputNode
-        let nativeFormat = input.outputFormat(forBus: 0)
+        let hardwareFormat = input.inputFormat(forBus: 0)
 
-        // The tap's buffers are mixed down to mono *by hand* rather than by the converter.
-        //
-        // `AVAudioEngine` caches its input node's output format and never refreshes it after
-        // the device moves: `setDeviceID` genuinely switches the hardware — `inputFormat`
-        // reports the microphone's 1 channel — but `outputFormat` stays on the previous
-        // device's channel count, and the node upmixes the mono microphone across all of
-        // them. One channel then carries the voice and the rest carry silence.
-        //
-        // Handing that to `AVAudioConverter` averages the channels, so a 16-channel
-        // aggregate divides speech by 16: loud enough to move a level meter, roughly 24 dB
-        // too quiet for the recogniser, and reported nowhere. Selecting the channel that
-        // actually carries signal sidesteps the whole thing, and keeps working no matter
-        // which aggregate device the system has made default.
-        let captureFormat = nativeFormat.channelCount > 1
-            ? AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: nativeFormat.sampleRate,
-                channels: 1,
-                interleaved: false
-              ) ?? nativeFormat
-            : nativeFormat
+        // A device that is present but not usable — a Bluetooth headset mid-handover is the
+        // usual one — reports a zero format. Capturing from it silently records nothing, so
+        // say so instead.
+        guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
+            self.engine = nil
+            throw AudioCaptureError.deviceUnavailable
+        }
 
-        self.captureFormat = captureFormat
-        dominantChannel = nil
-        channelEnergy = [Double](repeating: 0, count: Int(nativeFormat.channelCount))
-        energyFrames = 0
-
-        converter = captureFormat == outputFormat
-            ? nil
-            : AVAudioConverter(from: captureFormat, to: outputFormat)
-
+        // `format: nil` means "whatever this bus actually produces", resolved by the engine
+        // at the moment the tap runs. Passing a format read up front is what breaks after a
+        // device change: it can disagree with the hardware, and `installTap` either refuses
+        // it or hands back buffers nothing downstream can read. The converter is built from
+        // the first real buffer instead — see `configure`.
         input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 2048, format: nativeFormat) { [weak self] buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 2048, format: nil) { [weak self] buffer, _ in
             self?.handle(buffer)
         }
 
         engine.prepare()
         try engine.start()
         isRunning = true
-        Log.audio.info("capture started — native \(nativeFormat.sampleRate, privacy: .public)Hz \(nativeFormat.channelCount, privacy: .public)ch → mono → engine \(outputFormat.sampleRate, privacy: .public)Hz \(outputFormat.channelCount, privacy: .public)ch")
+        Log.audio.info("capture started — hardware \(hardwareFormat.sampleRate, privacy: .public)Hz \(hardwareFormat.channelCount, privacy: .public)ch → engine \(outputFormat.sampleRate, privacy: .public)Hz \(outputFormat.channelCount, privacy: .public)ch")
     }
 
     func stop() {
         guard isRunning else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        engine?.inputNode.removeTap(onBus: 0)
+        engine?.stop()
+        engine = nil
         isRunning = false
         converter = nil
         captureFormat = nil
+        configuredTapFormat = nil
         dominantChannel = nil
         channelEnergy = []
         energyFrames = 0
@@ -116,7 +117,16 @@ final class AudioCapture: @unchecked Sendable {
     private func handle(_ tapBuffer: AVAudioPCMBuffer) {
         onLevel?(Self.rms(of: tapBuffer))
 
-        guard let outputFormat, let captureFormat else { return }
+        guard let outputFormat else { return }
+
+        // The tap's real format is only known once a buffer arrives, and it can change
+        // underneath a running engine when the hardware moves. Reconfiguring from the
+        // buffer in hand is what keeps that from turning into silence.
+        if configuredTapFormat == nil || configuredTapFormat != tapBuffer.format {
+            configure(for: tapBuffer.format, outputFormat: outputFormat)
+        }
+
+        guard let captureFormat else { return }
 
         // Collapse a multi-channel tap onto the one channel carrying the microphone.
         let buffer = captureFormat.channelCount < tapBuffer.format.channelCount
@@ -157,6 +167,35 @@ final class AudioCapture: @unchecked Sendable {
         }
         guard status != .error, converted.frameLength > 0 else { return }
         onBuffer?(AudioChunk(buffer: converted))
+    }
+
+    /// Builds the mono capture format and the converter for a tap format seen on the wire.
+    ///
+    /// The buffers are mixed down to mono *by hand* rather than by the converter. An
+    /// aggregate device — the kind Loom, BlackHole and Rogue Amoeba tools install, and which
+    /// they make the system default — upmixes a mono microphone across every channel, so one
+    /// leg carries the voice and the rest carry silence. Handing that to `AVAudioConverter`
+    /// averages them, and a 16-channel aggregate divides speech by 16: loud enough to move a
+    /// level meter, roughly 24 dB too quiet for the recogniser, and reported nowhere.
+    private func configure(for tapFormat: AVAudioFormat, outputFormat: AVAudioFormat) {
+        configuredTapFormat = tapFormat
+
+        let mono = tapFormat.channelCount > 1
+            ? AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: tapFormat.sampleRate,
+                channels: 1,
+                interleaved: false
+              ) ?? tapFormat
+            : tapFormat
+
+        captureFormat = mono
+        dominantChannel = nil
+        channelEnergy = [Double](repeating: 0, count: Int(tapFormat.channelCount))
+        energyFrames = 0
+        converter = mono == outputFormat ? nil : AVAudioConverter(from: mono, to: outputFormat)
+
+        Log.audio.info("tap format \(tapFormat.sampleRate, privacy: .public)Hz \(tapFormat.channelCount, privacy: .public)ch → mono → engine \(outputFormat.sampleRate, privacy: .public)Hz \(outputFormat.channelCount, privacy: .public)ch")
     }
 
     /// Copies the microphone's channel out of a multi-channel tap buffer.
@@ -268,5 +307,17 @@ final class AudioCapture: @unchecked Sendable {
         // Map roughly -50…0 dBFS onto 0…1 so quiet speech still moves the meter.
         let db = 20 * log10(max(rms, 1e-7))
         return max(0, min(1, (db + 50) / 50))
+    }
+}
+
+enum AudioCaptureError: LocalizedError {
+    case deviceUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .deviceUnavailable:
+            return "That microphone isn't available right now. If a Bluetooth headset just "
+                + "connected, pick your input again in Settings ▸ General."
+        }
     }
 }

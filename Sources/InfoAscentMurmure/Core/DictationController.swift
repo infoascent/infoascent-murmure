@@ -40,6 +40,8 @@ final class DictationController {
     }
 
     private(set) var state: State = .idle
+    /// Hands-free: the mic stays open after the key comes back up, until the next tap.
+    private(set) var isLocked = false
     /// Live transcript, updated as the engine revises it. Drives the HUD.
     private(set) var transcript = ""
     /// Smoothed 0…1 mic level for the waveform.
@@ -75,6 +77,22 @@ final class DictationController {
     private var recorded: [AudioChunk] = []
     private var isComparing = false
 
+    /// Identifies one utterance. Every asynchronous step carries the number it was started
+    /// with and refuses to touch shared state once a newer one has begun.
+    private var session = 0
+    /// The lifecycle queue. See `enqueue`.
+    private var work: Task<Void, Never>?
+    private var watchdog: Task<Void, Never>?
+
+    /// Gesture recognition for the push-to-talk key.
+    private var pressedAt: Date?
+    private var lastShortTapAt: Date?
+    private var pendingLock = false
+    private var ignoreNextRelease = false
+
+    /// How close together two taps have to be to read as one double tap.
+    private static let doubleTapWindow: TimeInterval = 0.45
+
     init(
         formatter: (any TextFormatter)? = nil,
         makeEngine: @escaping @Sendable () -> any TranscriptionEngine = engineForCurrentSetting
@@ -89,8 +107,8 @@ final class DictationController {
     @discardableResult
     func activate() -> Bool {
         hotkey.key = Settings.shared.pushToTalkKey
-        hotkey.onPress = { [weak self] in self?.beginDictation() }
-        hotkey.onRelease = { [weak self] in self?.endDictation() }
+        hotkey.onPress = { [weak self] in self?.handleKeyDown() }
+        hotkey.onRelease = { [weak self] in self?.handleKeyUp() }
         return hotkey.start()
     }
 
@@ -104,6 +122,74 @@ final class DictationController {
     func reloadHotkey() -> Bool {
         hotkey.stop()
         return activate()
+    }
+
+    // MARK: - The push-to-talk gesture
+
+    /// The key going down.
+    ///
+    /// Three gestures share one key: hold to talk, a stray brush that must be ignored, and
+    /// a double tap that latches the mic open. Which one this is can only be known on the
+    /// way back up, so the press always starts capture — throwing away 300ms of audio costs
+    /// nothing, and waiting to find out would clip the first word of every utterance.
+    private func handleKeyDown() {
+        let now = Date()
+
+        // Latched and talking: this tap is the stop. The matching release must not then be
+        // read as the end of a hold that never happened.
+        if isLocked {
+            isLocked = false
+            ignoreNextRelease = true
+            pressedAt = nil
+            lastShortTapAt = nil
+            Log.hotkey.info("hands-free lock released")
+            endDictation()
+            return
+        }
+
+        if Settings.shared.handsFreeLockEnabled,
+           let last = lastShortTapAt,
+           now.timeIntervalSince(last) <= Self.doubleTapWindow {
+            pendingLock = true
+        }
+        lastShortTapAt = nil
+        pressedAt = now
+        beginDictation()
+    }
+
+    /// The key coming back up: this is where the gesture is finally identified.
+    private func handleKeyUp() {
+        if ignoreNextRelease {
+            ignoreNextRelease = false
+            return
+        }
+        guard let pressedAt else { return }
+        self.pressedAt = nil
+
+        let held = Date().timeIntervalSince(pressedAt)
+        let wasBrief = held < Settings.shared.minimumHoldSeconds
+
+        // Second tap of a double tap: keep the mic open until the next tap. A *held* second
+        // press is an ordinary hold, not a latch — someone who wants to keep holding the
+        // key is already telling us when they're done.
+        if pendingLock {
+            pendingLock = false
+            if wasBrief {
+                isLocked = true
+                Log.hotkey.info("hands-free lock engaged")
+                return
+            }
+        }
+
+        // A brush of the key while typing, or the first tap of a double tap. Either way
+        // there is no utterance here.
+        if wasBrief {
+            lastShortTapAt = Date()
+            abortDictation()
+            return
+        }
+
+        endDictation()
     }
 
     // MARK: - Button-driven recording
@@ -131,90 +217,102 @@ final class DictationController {
     private func beginDictation() {
         guard case .idle = state else { return }
         Log.speech.info("dictation begin")
+        session += 1
+        let session = self.session
         state = .starting
         transcript = ""
         holdStarted = Date()
         isComparing = Settings.shared.compareMode
         recorded.removeAll(keepingCapacity: true)
         engineName = isComparing ? "Comparing…" : Settings.shared.engine.displayName
+        startWatchdog(session: session)
 
-        Task { @MainActor in
-            do {
-                guard await Permissions.requestMicrophone() else {
-                    fail("Microphone access is off. Enable it in System Settings ▸ Privacy & Security ▸ Microphone.")
-                    return
-                }
+        enqueue { await self.startPipeline(session) }
+    }
 
-                let engine = makeEngine()
-                self.engine = engine
+    /// Builds the capture chain. Runs on the lifecycle queue, so nothing else in this class
+    /// is running while it does.
+    private func startPipeline(_ session: Int) async {
+        // Released before we got as far as asking for a microphone: nothing has been built
+        // yet, so there is nothing to unwind.
+        guard session == self.session, case .starting = state else { return }
 
-                let chunks = try await engine.start()
-
-                // Compare mode captures in *Apple's* format, not a format of our choosing.
-                //
-                // SpeechAnalyzer enforces `Audio sample data must be 16-bit signed integers`
-                // as a hard precondition — feeding it float32 doesn't fail gracefully, it
-                // kills the process. Parakeet is the flexible one (its `feed` converts
-                // int16/int32/float32), so the strict engine picks the format and the
-                // tolerant engine adapts. Both still replay the identical buffers.
-                let formatOwner: any TranscriptionEngine = isComparing ? AppleSpeechEngine() : engine
-                guard let format = await formatOwner.preferredInputFormat() else {
-                    throw TranscriptionError.noAudioFormat
-                }
-
-                // Audio must reach the engine in capture order. A stream plus a single
-                // draining task guarantees that; spawning a Task per buffer would not.
-                let (audioStream, audioContinuation) = AsyncStream<AudioChunk>.makeStream(
-                    bufferingPolicy: .bufferingNewest(64)
-                )
-                self.audioContinuation = audioContinuation
-
-                // The recording is accumulated *inside* the ordered drain, not by spawning
-                // a task per buffer. Unstructured tasks have no ordering guarantee, so
-                // collecting them separately could assemble the replay audio out of order
-                // and silently produce word-salad from the comparison.
-                let comparing = isComparing
-                self.feedTask = Task.detached(priority: .userInitiated) {
-                    var recording: [AudioChunk] = []
-                    for await chunk in audioStream {
-                        if comparing { recording.append(chunk) }
-                        await engine.feed(chunk)
-                    }
-                    return recording
-                }
-
-                try capture.start(
-                    outputFormat: format,
-                    deviceUID: Settings.shared.inputDeviceUID,
-                    onBuffer: { chunk in
-                        audioContinuation.yield(chunk)
-                    },
-                    onLevel: { [weak self] level in
-                        Task { @MainActor in self?.updateLevel(level) }
-                    }
-                )
-
-                // Bail out if the user already let go while we were spinning up.
-                guard case .starting = self.state else {
-                    await self.teardown()
-                    return
-                }
-
-                self.state = .listening
-                if Settings.shared.soundEnabled { NSSound(named: "Tink")?.play() }
-
-                self.consumeTask = Task { @MainActor in
-                    do {
-                        for try await chunk in chunks {
-                            self.transcript = chunk.text
-                        }
-                    } catch {
-                        self.fail(error.localizedDescription)
-                    }
-                }
-            } catch {
-                self.fail(error.localizedDescription)
+        do {
+            guard await Permissions.requestMicrophone() else {
+                fail("Microphone access is off. Enable it in System Settings ▸ Privacy & Security ▸ Microphone.")
+                return
             }
+            guard session == self.session, case .starting = state else { return }
+
+            let engine = makeEngine()
+            self.engine = engine
+
+            let chunks = try await engine.start()
+
+            // Compare mode captures in *Apple's* format, not a format of our choosing.
+            //
+            // SpeechAnalyzer enforces `Audio sample data must be 16-bit signed integers`
+            // as a hard precondition — feeding it float32 doesn't fail gracefully, it
+            // kills the process. Parakeet is the flexible one (its `feed` converts
+            // int16/int32/float32), so the strict engine picks the format and the
+            // tolerant engine adapts. Both still replay the identical buffers.
+            let formatOwner: any TranscriptionEngine = isComparing ? AppleSpeechEngine() : engine
+            guard let format = await formatOwner.preferredInputFormat() else {
+                throw TranscriptionError.noAudioFormat
+            }
+
+            // Audio must reach the engine in capture order. A stream plus a single
+            // draining task guarantees that; spawning a Task per buffer would not.
+            let (audioStream, audioContinuation) = AsyncStream<AudioChunk>.makeStream(
+                bufferingPolicy: .bufferingNewest(64)
+            )
+            self.audioContinuation = audioContinuation
+
+            // The recording is accumulated *inside* the ordered drain, not by spawning
+            // a task per buffer. Unstructured tasks have no ordering guarantee, so
+            // collecting them separately could assemble the replay audio out of order
+            // and silently produce word-salad from the comparison.
+            let comparing = isComparing
+            self.feedTask = Task.detached(priority: .userInitiated) {
+                var recording: [AudioChunk] = []
+                for await chunk in audioStream {
+                    if comparing { recording.append(chunk) }
+                    await engine.feed(chunk)
+                }
+                return recording
+            }
+
+            try capture.start(
+                outputFormat: format,
+                deviceUID: Settings.shared.inputDeviceUID,
+                onBuffer: { chunk in
+                    audioContinuation.yield(chunk)
+                },
+                onLevel: { [weak self] level in
+                    Task { @MainActor in self?.updateLevel(level) }
+                }
+            )
+
+            // Bail out if the user already let go while we were spinning up.
+            guard session == self.session, case .starting = self.state else {
+                await self.teardown()
+                return
+            }
+
+            self.state = .listening
+            if Settings.shared.soundEnabled { NSSound(named: "Tink")?.play() }
+
+            self.consumeTask = Task { @MainActor in
+                do {
+                    for try await chunk in chunks {
+                        self.transcript = chunk.text
+                    }
+                } catch {
+                    self.fail(error.localizedDescription)
+                }
+            }
+        } catch {
+            self.fail(error.localizedDescription)
         }
     }
 
@@ -224,61 +322,121 @@ final class DictationController {
         // it and pasting the same utterance twice. The window is wide: Parakeet transcribes
         // inside `finish()`, and smart cleanup adds up to 4s on top.
         guard state.isActive, state != .finishing else { return }
+        isLocked = false
         state = .finishing
         capture.stop()
         level = 0
         releasedAt = Date()
 
-        Task { @MainActor in
-            // Drain every captured buffer into the engine before asking it to finalize,
-            // or the tail of the utterance gets dropped.
-            audioContinuation?.finish()
-            audioContinuation = nil
-            recorded = await feedTask?.value ?? []
-            feedTask = nil
+        let session = self.session
+        enqueue { await self.stopPipeline(session) }
+    }
 
+    /// Throws away an utterance nobody meant to start.
+    ///
+    /// The pill comes down immediately — the whole point of this path is that a key brushed
+    /// while typing leaves nothing behind — and the engine is unwound behind it on the
+    /// lifecycle queue.
+    private func abortDictation() {
+        guard state.isActive else { return }
+        Log.speech.info("dictation discarded — key held below the minimum")
+        capture.stop()
+        isLocked = false
+        state = .idle
+        transcript = ""
+        level = 0
+
+        let session = self.session
+        enqueue { await self.abortPipeline(session) }
+    }
+
+    private func abortPipeline(_ session: Int) async {
+        guard session == self.session else { return }
+
+        capture.stop()
+        audioContinuation?.finish()
+        audioContinuation = nil
+        consumeTask?.cancel()
+        consumeTask = nil
+
+        let feed = feedTask
+        let engine = self.engine
+        feedTask = nil
+        self.engine = nil
+
+        // Wound down *off* the queue, unlike every other path here.
+        //
+        // Nothing this session produced is wanted — no transcript, no recording — and
+        // `finish()` on a streaming engine can take a second or more. The first tap of a
+        // double tap comes through here, so waiting for it would mean the hands-free
+        // recording that tap latches open starts with its first word already gone.
+        Task.detached {
+            _ = await feed?.value
             await engine?.finish()
-            await consumeTask?.value
-            consumeTask = nil
-            engine = nil
-
-            if isComparing {
-                await runComparison()
-                return
-            }
-
-            let raw = transcript
-            guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                Log.speech.error("empty transcript — the engine received audio but recognised nothing")
-                state = .idle
-                transcript = ""
-                return
-            }
-            Log.speech.info("raw transcript: \(raw.count, privacy: .public) chars")
-
-            let cleaned = Settings.shared.cleanupEnabled
-                ? await activeFormatter.format(raw)
-                : raw
-
-            // The dictionary runs last, and runs regardless of the cleanup setting. Biasing
-            // only raises the odds of the right word; this is the pass that guarantees it,
-            // so it must not be something the user can accidentally switch off.
-            let (output, corrections) = DictionaryStore.shared.corrector.apply(to: cleaned)
-            if !corrections.isEmpty {
-                Log.speech.info("dictionary · \(corrections.count, privacy: .public) correction(s) applied")
-            }
-
-            recordRun(text: output, corrections: corrections)
-            Log.inject.info("inserting \(output.count, privacy: .public) chars")
-            TextInjector.insert(output)
-            if Settings.shared.soundEnabled { NSSound(named: "Pop")?.play() }
-
-            state = .idle
-            transcript = ""
         }
     }
 
+    /// Finalizes the engine, cleans the transcript and types it. Runs on the lifecycle
+    /// queue, behind whatever `startPipeline` still had to do.
+    private func stopPipeline(_ session: Int) async {
+        guard session == self.session, state == .finishing else { return }
+
+        // Drain every captured buffer into the engine before asking it to finalize,
+        // or the tail of the utterance gets dropped.
+        audioContinuation?.finish()
+        audioContinuation = nil
+        recorded = await feedTask?.value ?? []
+        feedTask = nil
+
+        await engine?.finish()
+        await consumeTask?.value
+        consumeTask = nil
+        engine = nil
+
+        guard session == self.session else { return }
+
+        if isComparing {
+            await runComparison()
+            return
+        }
+
+        let raw = transcript
+        guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            Log.speech.error("empty transcript — the engine received audio but recognised nothing")
+            state = .idle
+            transcript = ""
+            return
+        }
+        Log.speech.info("raw transcript: \(raw.count, privacy: .public) chars")
+
+        let cleaned = Settings.shared.cleanupEnabled
+            ? await activeFormatter.format(raw)
+            : raw
+
+        // The dictionary runs last, and runs regardless of the cleanup setting. Biasing
+        // only raises the odds of the right word; this is the pass that guarantees it,
+        // so it must not be something the user can accidentally switch off.
+        let (output, corrections) = DictionaryStore.shared.corrector.apply(to: cleaned)
+        if !corrections.isEmpty {
+            Log.speech.info("dictionary · \(corrections.count, privacy: .public) correction(s) applied")
+        }
+
+        // Last checkpoint before the one irreversible act in this class. A watchdog
+        // reset during a long cleanup pass orphans this session, and typing its
+        // transcript into whatever has focus by then would be a genuine surprise.
+        guard session == self.session else { return }
+
+        recordRun(text: output, corrections: corrections)
+        Log.inject.info("inserting \(output.count, privacy: .public) chars")
+        TextInjector.insert(output)
+        if Settings.shared.soundEnabled { NSSound(named: "Pop")?.play() }
+
+        state = .idle
+        transcript = ""
+    }
+
     private func cancelDictation() {
+        isLocked = false
         capture.stop()
         audioContinuation?.finish()
         audioContinuation = nil
@@ -306,7 +464,79 @@ final class DictationController {
         engine = nil
         consumeTask?.cancel()
         consumeTask = nil
+    }
+
+    // MARK: - Serialising the lifecycle
+
+    /// Runs one lifecycle step only once the previous one has finished.
+    ///
+    /// Press and release can land milliseconds apart — a key brushed while typing does
+    /// exactly that — and each half of the lifecycle suspends several times. Left to
+    /// interleave, the release path ends up awaiting an engine the press path is still
+    /// building, and the two overwrite each other's continuation and tasks. The utterance
+    /// then never reaches `.idle`: the pill sits on screen and the only cure is relaunching
+    /// the app. Serialising the steps makes them run in the order the key was actually
+    /// pressed in, which is the order the user experienced.
+    private func enqueue(_ step: @escaping @MainActor () async -> Void) {
+        let previous = work
+        work = Task { @MainActor in
+            await previous?.value
+            await step()
+        }
+    }
+
+    /// Last resort, so that no failure can leave the pill on screen for good.
+    ///
+    /// Every path back to `.idle` is serialised now, but an engine that never returns from
+    /// `finish()` would still wedge the queue, and today that costs a relaunch. A session
+    /// still starting long after any hardware would have come up, or still finishing long
+    /// after any transcript would have landed, is abandoned instead.
+    private func startWatchdog(session: Int) {
+        watchdog?.cancel()
+        watchdog = Task { @MainActor [weak self] in
+            var starting = 0.0
+            var finishing = 0.0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self, session == self.session, !Task.isCancelled else { return }
+
+                switch self.state {
+                case .starting: starting += 0.5
+                case .finishing: finishing += 0.5
+                case .listening: break          // a latched hold is allowed to run all day
+                case .idle, .error: return
+                }
+
+                if starting > 10 || finishing > 60 {
+                    Log.app.error("dictation wedged — abandoning the session and re-arming")
+                    self.forceReset()
+                    return
+                }
+            }
+        }
+    }
+
+    /// Drops everything in flight and returns to a state the next key press can use.
+    private func forceReset() {
+        work?.cancel()
+        work = nil
+        capture.stop()
+        audioContinuation?.finish()
+        audioContinuation = nil
+        feedTask?.cancel()
+        feedTask = nil
+        consumeTask?.cancel()
+        consumeTask = nil
+        engine = nil
+        isLocked = false
+        pendingLock = false
+        ignoreNextRelease = false
+        pressedAt = nil
+        // Orphans every step still running inside the abandoned queue.
+        session += 1
         state = .idle
+        transcript = ""
+        level = 0
     }
 
     // MARK: - Helpers

@@ -39,6 +39,23 @@ struct SettingsWindow: View {
             }
 
             Section {
+                Picker("Ignore presses shorter than", selection: $settings.minimumHoldSeconds) {
+                    Text("Off").tag(0.0)
+                    Text("0.25 seconds").tag(0.25)
+                    Text("0.4 seconds").tag(0.4)
+                    Text("0.6 seconds").tag(0.6)
+                    Text("1 second").tag(1.0)
+                }
+                Toggle("Double-tap to dictate hands-free", isOn: $settings.handsFreeLockEnabled)
+            } footer: {
+                Text("The push-to-talk key sits where a hand rests, and clipping it while "
+                    + "typing would start an utterance you never meant. A press shorter than "
+                    + "this is discarded. Two quick taps instead latch the mic open so you "
+                    + "can talk with your hands free; one more tap ends it and types the "
+                    + "transcript.")
+            }
+
+            Section {
                 Picker("Microphone", selection: Binding(
                     get: { settings.inputDeviceUID ?? MicrophonePicker.systemDefaultTag },
                     set: { settings.inputDeviceUID = $0 == MicrophonePicker.systemDefaultTag ? nil : $0 }
