@@ -14,6 +14,8 @@ actor AppleSpeechEngine: TranscriptionEngine {
     private var analyzer: SpeechAnalyzer?
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
     private var resultsTask: Task<Void, Never>?
+    /// Held so `finish()` can close the stream itself when the analyzer won't.
+    private var chunkContinuation: AsyncThrowingStream<TranscriptionChunk, Error>.Continuation?
 
     /// Text the engine has committed. Volatile results are appended on top for display
     /// but discarded as soon as a final result covering the same range arrives.
@@ -64,6 +66,7 @@ actor AppleSpeechEngine: TranscriptionEngine {
         finalizedText = ""
 
         let (chunks, chunkContinuation) = AsyncThrowingStream<TranscriptionChunk, Error>.makeStream()
+        self.chunkContinuation = chunkContinuation
 
         // Drain the transcriber's results into our simpler chunk stream.
         resultsTask = Task { [weak self] in
@@ -92,21 +95,52 @@ actor AppleSpeechEngine: TranscriptionEngine {
         inputContinuation?.yield(AnalyzerInput(buffer: chunk.buffer))
     }
 
+    /// Closes the session and flushes what the analyzer has, but never waits forever.
+    ///
+    /// `finalizeAndFinishThroughEndOfInput()` does not reliably return when the session was
+    /// handed almost no audio — a key tapped rather than held, or a hold whose model load
+    /// ran long enough to eat the whole utterance. It simply never comes back, and since
+    /// the rest of the dictation lifecycle waits on this call, the HUD used to stay on
+    /// screen with no way out short of relaunching the app.
+    ///
+    /// So the call is raced against a deadline. Past it the analyzer is told to stop where
+    /// it is, and the result stream is closed from this side — whatever text had already
+    /// been committed is still returned, which for an utterance this short is usually none.
     func finish() async {
         inputContinuation?.finish()
         inputContinuation = nil
 
-        do {
-            try await analyzer?.finalizeAndFinishThroughEndOfInput()
-        } catch {
-            Log.speech.error("finalize failed: \(error.localizedDescription, privacy: .public)")
-            await analyzer?.cancelAndFinishNow()
+        let analyzer = self.analyzer
+        self.analyzer = nil
+        self.transcriber = nil
+
+        if let analyzer {
+            let finalized = await withDeadline(seconds: Self.finalizeDeadline) {
+                do {
+                    try await analyzer.finalizeAndFinishThroughEndOfInput()
+                } catch {
+                    Log.speech.error("finalize failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+
+            if !finalized {
+                Log.speech.error("finalize timed out after \(Self.finalizeDeadline, privacy: .public)s — stopping the analyzer where it stands")
+                // Detached: `cancelAndFinishNow` is the escape hatch for a stuck analyzer
+                // and can be stuck itself. Nothing here needs to see it return.
+                Task.detached { await analyzer.cancelAndFinishNow() }
+            }
         }
 
-        analyzer = nil
-        transcriber = nil
+        // The consumer of `chunks` waits for this stream to end. On the timed-out path the
+        // analyzer never ends it, so close it here — otherwise the wedge simply moves one
+        // step downstream.
+        resultsTask?.cancel()
         resultsTask = nil
+        chunkContinuation?.finish()
+        chunkContinuation = nil
     }
+
+    private static let finalizeDeadline: Double = 5
 
     // MARK: - Result accumulation
 

@@ -42,6 +42,20 @@ Then grant two permissions — neither is optional, and neither can be requested
 
 Restart InfoAscent Murmure after granting Accessibility. Then hold **Right ⌥** and talk.
 
+### The three gestures
+
+| Gesture | What happens |
+|---|---|
+| **Hold** the key, talk, release | Ordinary push to talk |
+| **Tap** it, shorter than the minimum hold | Ignored — nothing is recorded or typed |
+| **Double tap** | Latches the mic open. Talk hands-free; one more tap ends it and types |
+
+The minimum hold is 0.4s by default and lives in Settings ▸ General, along with a switch
+for the double-tap latch. It exists because the push-to-talk key sits where a hand rests:
+clipping it while typing would otherwise start an utterance nobody meant. While the mic is
+latched the pill carries a red dot, since the key isn't being held and nothing else says
+the mic is still open.
+
 ### Why grants survive rebuilds here
 
 TCC stores a *code-signing requirement* per entry, not just a path. An ad-hoc signature

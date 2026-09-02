@@ -64,6 +64,22 @@ compute with the clock started *after* model load. Wispr Flow's number is its ow
 `e2eLatency`, which includes a network round trip and its cleanup pass. Don't present them
 as one ranking.
 
+**`SpeechAnalyzer.finalizeAndFinishThroughEndOfInput()` sometimes never returns.** Not
+slowly — never. It happens when the session was handed almost no audio: a key tapped rather
+than held, or a hold whose model load ate the whole utterance. Everything downstream waits
+on it, so the HUD stayed on screen and the app had to be relaunched. Every wait in the
+dictation tail now goes through `withDeadline` (`Support/Deadline.swift`), which is
+deliberately not a task group — a group awaits its children, so a child ignoring
+cancellation hangs it just as long. Don't "simplify" it into one.
+
+**`DictationController`'s lifecycle steps run on a serial queue, and that is load-bearing.**
+Press and release land milliseconds apart on a brushed key, and each half suspends several
+times. Interleaved, the release path awaits an engine the press path is still building and
+the two overwrite each other's continuation and tasks. Every step also carries the `session`
+it started with and checks it after each suspension — including immediately before
+`TextInjector.insert`, so an abandoned utterance can't type itself into whatever has focus
+minutes later.
+
 **`MainActor.assumeIsolated` will crash the process.** It does not check the claim, it
 asserts it. Use `await MainActor.run` from any non-main-actor context. This took the app
 down once already.
@@ -110,6 +126,14 @@ A bare `tccutil reset Accessibility` wipes every app on the machine. Then quit S
 Settings entirely (⌘Q) before reopening; the Privacy pane caches its list.
 
 **`log` may be shadowed in the user's shell.** Use `/usr/bin/log` explicitly.
+
+**Reading `inputNode.outputFormat(forBus:)` up front does not survive a device change.**
+The node keeps describing the device its graph was built against — connect a Bluetooth
+headset and it reports the previous sample rate and channel count. Installing a tap with
+that format yields **nothing at all**: no error, no buffers, no level. So `AudioCapture`
+builds a fresh `AVAudioEngine` per recording, installs the tap with `format: nil`, and
+configures its converter from the first buffer that actually arrives. Don't put the format
+read back at the top.
 
 **Don't run the `.app` from the repo folder.** It's iCloud-synced and the sync engine can
 corrupt the signature. `make install` puts the running copy in `/Applications`.

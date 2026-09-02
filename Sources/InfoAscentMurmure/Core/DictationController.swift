@@ -388,10 +388,19 @@ final class DictationController {
         recorded = await feedTask?.value ?? []
         feedTask = nil
 
-        await engine?.finish()
-        await consumeTask?.value
-        consumeTask = nil
+        // Bounded, because an engine that never returns from `finish()` would hold the
+        // whole lifecycle open — and this is the one place the user is already waiting.
+        // Apple's engine defends itself as well; this covers whichever engine is selected.
+        let closing = engine
         engine = nil
+        if await withDeadline(seconds: 8, { await closing?.finish() }) == false {
+            Log.speech.error("engine finish timed out — giving up on the tail of this utterance")
+        }
+
+        let consuming = consumeTask
+        consumeTask = nil
+        _ = await withDeadline(seconds: 3) { await consuming?.value }
+        consuming?.cancel()
 
         guard session == self.session else { return }
 
@@ -460,8 +469,9 @@ final class DictationController {
         audioContinuation = nil
         await feedTask?.value
         feedTask = nil
-        await engine?.finish()
+        let closing = engine
         engine = nil
+        _ = await withDeadline(seconds: 8) { await closing?.finish() }
         consumeTask?.cancel()
         consumeTask = nil
     }
