@@ -1,10 +1,27 @@
 # InfoAscent Murmure
 
-Push-to-talk dictation for macOS. Hold a key, talk, release — cleaned-up text lands in
-whatever text field has focus. A Wispr Flow-shaped app, built native and fully on-device.
+Push-to-talk dictation for macOS. Hold a key, talk, release, and cleaned-up text lands in
+whatever text field has focus. A Wispr Flow-shaped app, built native and fully on-device:
+no account, no subscription, nothing leaves the machine.
 
-**Status:** working skeleton. Builds, launches, arms the hotkey, transcribes, injects.
-Branding and the LLM cleanup tier are the next passes.
+> ### Just want to install it?
+> **Read [INSTALLATION.md](INSTALLATION.md)** (in French, written for someone who has never
+> opened a terminal), or paste this into Claude Code:
+>
+> > Installe InfoAscent Murmure depuis https://github.com/infoascent/infoascent-murmure
+> > en suivant la section « Procédure pour un agent » de son fichier INSTALLATION.md.
+>
+> One command, if you prefer:
+> ```bash
+> cd ~ && git clone https://github.com/infoascent/infoascent-murmure.git && cd infoascent-murmure && bash install.sh
+> ```
+> **Requires macOS 26 (Tahoe) or newer.** The speech engine does not exist before it, so
+> nothing compiles on an older system.
+
+**Status:** in daily use on macOS 26. Builds, launches, arms the hotkey, transcribes,
+cleans up and injects. The Windows port is a dictionary engine plus a specification, not a
+working app. The rest of this file is for people changing the code, see
+[AGENTS.md](AGENTS.md) too.
 
 ---
 
@@ -30,7 +47,8 @@ the same key both record, and whichever injects text will fight the other.
 ## Quick start
 
 ```bash
-make install     # builds, bundles, signs, copies to /Applications, launches
+make signing-cert   # once per machine: stable local signing identity, no Apple account
+make install        # builds, bundles, signs, copies to /Applications, launches
 ```
 
 Then grant two permissions — neither is optional, and neither can be requested silently:
@@ -209,7 +227,7 @@ events) and confirmed via `/usr/bin/log show --predicate 'subsystem ==
 - HUD renders bottom-center at `{{790, 96}, {340, 76}}` without taking focus.
 - Silence produces an empty transcript and injects nothing.
 
-**Not yet verified:** speech → transcript → cleanup → injection. Synthetic key events
-can't produce audio, so this needs a human to hold the key and talk.
+- Speech → transcript → cleanup → injection, by hand, daily. Synthetic key events can't
+  produce audio, so this is the one path CI structurally cannot cover.
 
 > `log` is shadowed in this shell — use `/usr/bin/log` explicitly or it returns nothing.
