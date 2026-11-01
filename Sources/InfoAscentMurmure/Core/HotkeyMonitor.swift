@@ -72,7 +72,10 @@ final class HotkeyMonitor {
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .defaultTap,
+            // A filtering tap holds every modifier event system-wide until this callback
+            // returns. fn is never consumed, so it gets a listen-only tap: a busy main
+            // thread then delays only Murmure, never the user's whole keyboard.
+            options: key.shouldConsumeEvent ? .defaultTap : .listenOnly,
             eventsOfInterest: CGEventMask(mask),
             callback: { _, type, event, refcon in
                 guard let refcon else { return Unmanaged.passUnretained(event) }

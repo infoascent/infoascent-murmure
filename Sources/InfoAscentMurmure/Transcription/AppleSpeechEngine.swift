@@ -21,7 +21,7 @@ actor AppleSpeechEngine: TranscriptionEngine {
     /// but discarded as soon as a final result covering the same range arrives.
     private var finalizedText = ""
 
-    init(locale: Locale = Locale.current) {
+    init(locale: Locale = Locale(identifier: "fr-FR")) {
         self.locale = locale
     }
 
@@ -35,8 +35,11 @@ actor AppleSpeechEngine: TranscriptionEngine {
             throw TranscriptionError.localeUnsupported(locale)
         }
 
-        let resolvedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale)
-            ?? Locale(identifier: "en-US")
+        // No fallback to English. Transcribing French with an English model produces
+        // confident nonsense, which is worse than a clear error.
+        guard let resolvedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
+            throw TranscriptionError.localeUnsupported(locale)
+        }
 
         let transcriber = Self.makeTranscriber(locale: resolvedLocale)
         self.transcriber = transcriber
@@ -194,6 +197,12 @@ actor AppleSpeechEngine: TranscriptionEngine {
         let selected = transcriber.selectedLocales
         let alreadyThere = selected.allSatisfy { locale in
             installed.contains { $0.identifier(.bcp47) == locale.identifier(.bcp47) }
+        }
+        // The locale also has to be *reserved* for this app, or the framework logs
+        // "Cannot use modules with unallocated locales" on every session and treats the
+        // model as evictable. Reserving is idempotent and cheap.
+        for locale in selected {
+            _ = try? await AssetInventory.reserve(locale: locale)
         }
         guard !alreadyThere else { return }
 

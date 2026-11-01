@@ -83,10 +83,16 @@ struct SettingsWindow: View {
                         Text(choice == .apple ? "Apple" : "Parakeet").tag(choice)
                     }
                 }
+                if settings.engine == .apple {
+                    Picker("Language", selection: $settings.dictationLanguage) {
+                        Text("Français").tag("fr-FR")
+                        Text("English").tag("en-US")
+                    }
+                }
             } footer: {
                 Text(settings.engine == .apple
                     ? "Apple's on-device transcriber. Streams text while you speak, needs no "
-                        + "download, and follows your Mac's language."
+                        + "download. Listens in the language picked above, whatever your Mac's language."
                     : "Parakeet on the Neural Engine. Resolves on release rather than live, "
                         + "and downloads a ~470 MB model on first use.")
             }

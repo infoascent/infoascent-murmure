@@ -1,5 +1,5 @@
 EXEC     := InfoAscentMurmure
-CONFIG   := debug
+CONFIG   ?= release
 
 ## Build products live OUTSIDE this directory, for the same reason the .app does.
 ##

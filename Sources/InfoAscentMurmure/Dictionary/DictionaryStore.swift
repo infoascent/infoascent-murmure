@@ -93,9 +93,10 @@ final class DictionaryStore {
             revision += 1
             return
         }
-        entries = Self.parse(text)
+        entries = DictionaryEntry.carryingIdentity(from: entries, into: Self.parse(text))
         revision += 1
     }
+
 
     static func parse(_ text: String) -> [DictionaryEntry] {
         text.split(separator: "\n", omittingEmptySubsequences: false).compactMap { rawLine in

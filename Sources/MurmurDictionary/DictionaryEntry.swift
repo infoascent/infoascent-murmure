@@ -114,3 +114,28 @@ public struct DictionaryWarning: Identifiable, Sendable {
         return warnings
     }
 }
+
+extension DictionaryEntry {
+    /// Gives freshly parsed entries the ids of the entries they match.
+    ///
+    /// The file has no ids, so a plain re-parse mints new ones. The watcher re-reads the file
+    /// after *every* save, our own included (the event lands after `isSaving` has already
+    /// been cleared), so every entry used to change identity a moment after any edit. The
+    /// panel still held the old ids, and `update` — toggling an entry, editing one — then
+    /// matched nothing and was dropped without a word. Matching on content keeps an entry
+    /// the same entry across a reload.
+    public static func carryingIdentity(
+        from old: [DictionaryEntry],
+        into parsed: [DictionaryEntry]
+    ) -> [DictionaryEntry] {
+        var pool = old
+        return parsed.map { entry in
+            guard let index = pool.firstIndex(where: {
+                $0.kind == entry.kind && $0.write == entry.write && $0.hear == entry.hear
+            }) else { return entry }
+            var kept = entry
+            kept.id = pool.remove(at: index).id
+            return kept
+        }
+    }
+}

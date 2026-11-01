@@ -32,6 +32,8 @@ enum TextInjector {
         }
     }
 
+    private static let axTimeout: Float = 0.3
+
     private enum AXOutcome {
         case inserted
         case unverified(String)
@@ -41,6 +43,11 @@ enum TextInjector {
 
     private static func insertViaAccessibility(_ text: String) -> AXOutcome {
         let systemWide = AXUIElementCreateSystemWide()
+        // Every AX call is a synchronous round trip into the target app, on the main
+        // thread, with a default timeout of ~6 s. A busy Electron app or browser turns the
+        // five calls below into a half-minute freeze of Murmure itself, which is what
+        // ended in a force quit. A short bound just falls through to the paste path.
+        AXUIElementSetMessagingTimeout(systemWide, Self.axTimeout)
 
         var focused: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -52,6 +59,7 @@ enum TextInjector {
         }
 
         let element = unsafeDowncast(focused as AnyObject, to: AXUIElement.self)
+        AXUIElementSetMessagingTimeout(element, Self.axTimeout)
 
         var settable: DarwinBoolean = false
         guard AXUIElementIsAttributeSettable(

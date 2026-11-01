@@ -69,6 +69,16 @@ final class Settings {
         didSet { defaults.set(smartCleanup, forKey: Keys.smartCleanup) }
     }
 
+    /// The language Apple's engine listens for, as a BCP-47 identifier.
+    ///
+    /// Deliberately *not* `Locale.current`. That is the Mac's interface language, which has
+    /// nothing to do with the language spoken into the mic: switch macOS to English and the
+    /// engine silently starts hearing French as English, emitting phonetic word-salad
+    /// ("Pour a stage, me content, unique…") or nothing at all. French by default.
+    var dictationLanguage: String {
+        didSet { defaults.set(dictationLanguage, forKey: Keys.dictationLanguage) }
+    }
+
     /// Play a short tick when capture starts and stops.
     var soundEnabled: Bool {
         didSet { defaults.set(soundEnabled, forKey: Keys.soundEnabled) }
@@ -86,6 +96,7 @@ final class Settings {
         static let compareMode = "compareMode"
         static let minimumHoldSeconds = "minimumHoldSeconds"
         static let handsFreeLockEnabled = "handsFreeLockEnabled"
+        static let dictationLanguage = "dictationLanguage"
     }
 
     private init() {
@@ -102,5 +113,6 @@ final class Settings {
         // answer. Measured against real holds: deliberate ones don't come in under 400ms.
         minimumHoldSeconds = defaults.object(forKey: Keys.minimumHoldSeconds) as? Double ?? 0.4
         handsFreeLockEnabled = defaults.object(forKey: Keys.handsFreeLockEnabled) as? Bool ?? true
+        dictationLanguage = defaults.string(forKey: Keys.dictationLanguage) ?? "fr-FR"
     }
 }
